@@ -1,0 +1,128 @@
+params.reads   = "/home/mohamed/Genomics/Human/df.ex/fastqs/*.{1,2}.fastq"
+params.trimmed = "/home/mohamed/Genomics/Human/df.ex/trimmed_output/*.Tri.{1,2}.fastq"
+params.genome  = "/home/mohamed/Genomics/Human/df.ex/Referance/grch38/genome"
+params.gtf     = "/home/mohamed/Genomics/Human/df.ex/GTF/gencode.v49.annotation.gtf"
+params.outdir  = "/home/mohamed/Genomics/Human/df.ex/outputs"
+
+// ==================== PROCESSES ====================
+
+process TRIMMING_AND_QC {
+    tag "Trimming & QC ${sample_id}"
+    maxForks 1
+    publishDir "${params.outdir}/trimmed_reads", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(reads)
+
+    output:
+    tuple val(sample_id), path(["${sample_id}.Tri.1.fastq", "${sample_id}.Tri.2.fastq"]), emit: trimmed_reads
+    path "${sample_id}_fastp.html"
+    path "${sample_id}_fastp.json"
+
+    script:
+    """
+    fastp -i ${reads[0]} -I ${reads[1]} \
+          -o ${sample_id}.Tri.1.fastq -O ${sample_id}.Tri.2.fastq \
+          --trim_front1 13 --trim_front2 13 \
+          -q 20 -u 30 -l 36 \
+          -h ${sample_id}_fastp.html -j ${sample_id}_fastp.json
+    """
+}
+
+process ALIGNMENT {
+    tag "Aligning ${sample_id}"
+    maxForks 1
+
+    input:
+    tuple val(sample_id), path(Tri_file)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.sam"), emit: sam_tuple
+
+    script:
+    """
+    hisat2 -p 4 -x ${params.genome} \
+        -1 ${Tri_file[0]} \
+        -2 ${Tri_file[1]} \
+        -S ${sample_id}.sam
+    """
+}
+
+process CONVERT_TO_BAM {
+    tag "Converting ${sample_id}"
+
+    input:
+    tuple val(sample_id), path(sam_file)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.bam"), emit: bam_tuple
+
+    script:
+    """
+    samtools view -b ${sam_file} -o ${sample_id}.bam
+    """
+}
+
+process SORT_BAM {
+    tag "Sorting ${sample_id}"
+
+    input:
+    tuple val(sample_id), path(bam_file)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.sort.bam"), emit: sorted_bam_tuple
+
+    script:
+    """
+    samtools sort ${bam_file} -o ${sample_id}.sort.bam
+    """
+}
+
+
+
+process FEATURE_COUNTS {
+    tag "Counting ${sample_id}"
+    publishDir "${params.outdir}/counts", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(sorted_bam)
+
+    output:
+    path "${sample_id}_clean_counts.txt"   // <--- يجب أن يطابق الاسم بالأسفل تماماً
+
+    script:
+    """
+    featureCounts -p -g gene_name -T 8 \
+        -a ${params.gtf} \
+        -o ${sample_id}_raw.txt \
+        ${sorted_bam}
+
+    grep -v '^#' ${sample_id}_raw.txt | cut -f1,7 > ${sample_id}_clean_counts.txt
+    """
+}
+
+// ==================== WORKFLOWS ====================
+
+workflow TRI_QC {
+    read_pairs_ch = Channel.fromFilePairs(params.reads)
+    TRIMMING_AND_QC(read_pairs_ch)
+}
+
+workflow MAPPING_TO_COUNT {
+    trimmed_ch = Channel.fromFilePairs(params.trimmed)
+
+    ALIGNMENT(trimmed_ch)
+    CONVERT_TO_BAM(ALIGNMENT.out.sam_tuple)
+    SORT_BAM(CONVERT_TO_BAM.out.bam_tuple)
+    FEATURE_COUNTS(SORT_BAM.out.sorted_bam_tuple)
+}
+
+workflow {
+    read_pairs_ch = Channel.fromFilePairs(params.reads)
+
+    TRIMMING_AND_QC(read_pairs_ch)
+    ALIGNMENT(TRIMMING_AND_QC.out.trimmed_reads)
+    CONVERT_TO_BAM(ALIGNMENT.out.sam_tuple)
+    SORT_BAM(CONVERT_TO_BAM.out.bam_tuple)
+    FEATURE_COUNTS(SORT_BAM.out.sorted_bam_tuple)
+}
