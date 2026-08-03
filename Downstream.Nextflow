@@ -1,0 +1,100 @@
+params.counts_dir = "/home/mohamed/Genomics/Human/df.ex/outputs/counts"
+params.outdir     = "/home/mohamed/Genomics/Human/df.ex/downstream_results"
+params.r_script   = "/home/mohamed/Genomics/Human/df.ex/downstream/down-bulk.R"
+params.design_col = "condition"
+
+// ==================== PROCESSES ====================
+
+process COMBINE_COUNTS {
+    publishDir "${params.outdir}", mode: 'copy'
+
+    input:
+    path counts_files
+
+    output:
+    path "counts_matrix.txt", emit: matrix
+
+    script:
+    """
+    # تجهيز الهيدر: Geneid Chr Start End Strand Length sample1 sample2 ...
+    headers="Geneid\tChr\tStart\tEnd\tStrand\tLength"
+    for f in *_clean_counts.txt; do
+        s_name=\$(echo \$f | sed 's/_clean_counts.txt//')
+        headers="\${headers}\t\${s_name}"
+    done
+    echo -e "\$headers" > counts_matrix.txt
+
+    paste *_clean_counts.txt | awk '
+        NR==1 { next }
+        {
+            line = \$1 "\t.\t.\t.\t.\t.";
+            for(i=2; i<=NF; i+=2) {
+                line = line "\t" \$i
+            }
+            print line
+        }
+    ' >> counts_matrix.txt
+    """
+}
+
+process CREATE_METADATA {
+    publishDir "${params.outdir}", mode: 'copy'
+
+    input:
+    path counts_matrix
+
+    output:
+    path "metadata.txt", emit: metadata
+
+    script:
+    """
+    echo -e "Sample\t${params.design_col}" > metadata.txt
+
+    
+    head -n 1 ${counts_matrix} | tr '\t' '\n' | tail -n +7 > samples.tmp
+
+    total=\$(wc -l < samples.tmp)
+    half=\$(( (total + 1) / 2 ))
+
+    count=1
+    while read -r sample; do
+        if [ \$count -le \$half ]; then
+            echo -e "\${sample}\tControl" >> metadata.txt
+        else
+            echo -e "\${sample}\tTreated" >> metadata.txt
+        fi
+        count=\$((count + 1))
+    done < samples.tmp
+
+    rm samples.tmp
+    """
+}
+
+
+process DESEQ2_ANALYSIS {
+    publishDir "${params.outdir}/deseq2_outputs", mode: 'copy'
+
+    input:
+    path matrix_file
+    path metadata_file
+    path r_script
+
+    output:
+    path "*"
+
+    script:
+    """
+    /usr/bin/Rscript ${r_script} ${matrix_file} ${metadata_file} ${params.design_col}
+    """
+}
+
+// ==================== WORKFLOW ====================
+
+workflow {
+    counts_ch = Channel.fromPath("${params.counts_dir}/*_clean_counts.txt").collect()
+    r_script_ch = Channel.fromPath(params.r_script)
+
+    COMBINE_COUNTS(counts_ch)
+    CREATE_METADATA(COMBINE_COUNTS.out.matrix)
+    DESEQ2_ANALYSIS(COMBINE_COUNTS.out.matrix, CREATE_METADATA.out.metadata, r_script_ch)
+}
