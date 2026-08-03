@@ -1,0 +1,7 @@
+Sample	condition
+CRISPR_one	Control
+CRISPR_three	Control
+CRISPR_two	Control
+control_one	Treated
+control_three	Treated
+control_two	Treated
